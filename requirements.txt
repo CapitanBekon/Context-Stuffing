@@ -1,0 +1,7 @@
+# Context Window Saturation — Prompt Injection Experiment
+# Install: pip install -r requirements.txt
+#
+# No third-party dotenv library needed — .env loading is handled in config.py
+# using the Python standard library only.
+
+anthropic>=0.40.0
