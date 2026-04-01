@@ -1,10 +1,10 @@
-# ─── Secrets ────────────────────────────────────────────────────────────────
+# Secrets 
 .env
 
-# ─── Experiment results (raw data — large files, regenerable) ───────────────
-results/
+# Experiment results (raw data — large files, regenerable)
+# results/
 
-# ─── Python ─────────────────────────────────────────────────────────────────
+#Python
 __pycache__/
 *.py[cod]
 *.pyo
@@ -16,26 +16,13 @@ build/
 *.egg
 .eggs/
 
-# ─── Virtual environments ────────────────────────────────────────────────────
+# Virtual environments
 venv/
 .venv/
 env/
 .env/
 ENV/
 
-# ─── IDEs & editors ─────────────────────────────────────────────────────────
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-Thumbs.db
-
-# ─── Jupyter ────────────────────────────────────────────────────────────────
-.ipynb_checkpoints/
-*.ipynb
-
-# ─── OS ─────────────────────────────────────────────────────────────────────
+# OS
 .DS_Store
 desktop.ini
