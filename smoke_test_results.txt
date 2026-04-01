@@ -1,0 +1,26 @@
+WARNING: ANTHROPIC_API_KEY not found in environment or .env file
+  Set it with: export ANTHROPIC_API_KEY='sk-ant-...'
+  Or create a .env file with: ANTHROPIC_API_KEY=sk-ant-...
+Traceback (most recent call last):
+  File "/sessions/nifty-happy-ptolemy/mnt/Final Year Project/Current Project Files/experiment/test_attacks.py", line 154, in <module>
+    run_test(args.input, verbose=args.verbose)
+  File "/sessions/nifty-happy-ptolemy/mnt/Final Year Project/Current Project Files/experiment/test_attacks.py", line 54, in run_test
+    client  = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+  File "/sessions/nifty-happy-ptolemy/.local/lib/python3.10/site-packages/anthropic/_client.py", line 105, in __init__
+    super().__init__(
+  File "/sessions/nifty-happy-ptolemy/.local/lib/python3.10/site-packages/anthropic/_base_client.py", line 954, in __init__
+    self._client = http_client or SyncHttpxClientWrapper(
+  File "/sessions/nifty-happy-ptolemy/.local/lib/python3.10/site-packages/anthropic/_base_client.py", line 871, in __init__
+    proxy_mounts = {
+  File "/sessions/nifty-happy-ptolemy/.local/lib/python3.10/site-packages/anthropic/_base_client.py", line 872, in <dictcomp>
+    key: None if proxy is None else HTTPTransport(proxy=proxy, **transport_kwargs)
+  File "/sessions/nifty-happy-ptolemy/.local/lib/python3.10/site-packages/httpx/_transports/default.py", line 191, in __init__
+    raise ImportError(
+ImportError: Using SOCKS proxy, but the 'socksio' package is not installed. Make sure to install httpx using `pip install httpx[socks]`.
+Exception ignored in: <function SyncHttpxClientWrapper.__del__ at 0x7f6e976d3d00>
+Traceback (most recent call last):
+  File "/sessions/nifty-happy-ptolemy/.local/lib/python3.10/site-packages/anthropic/_base_client.py", line 901, in __del__
+    if self.is_closed:
+  File "/sessions/nifty-happy-ptolemy/.local/lib/python3.10/site-packages/httpx/_client.py", line 228, in is_closed
+    return self._state == ClientState.CLOSED
+AttributeError: 'SyncHttpxClientWrapper' object has no attribute '_state'

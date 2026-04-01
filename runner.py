@@ -55,7 +55,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import config
-from context_builder import build_noise_messages, estimated_noise_tokens
+from context_builder import build_noise_messages, estimated_noise_tokens, pre_generate_noise_cache
 from classifier import classify_injection
 
 
@@ -101,6 +101,118 @@ def load_attacks(filepath: str) -> list[dict]:
 
     return attacks
 
+# ─── Input text formatting ────────────────────────────────────────────────────
+
+def _format_input_text(messages: list[dict], verbose: bool = False) -> str:
+    """
+    Reconstruct human-readable input text from message array.
+    If verbose=True, returns full input. Otherwise, truncates to show noise snippet + attack.
+    """
+    if not messages:
+        return "(no input)"
+
+    full_text = ""
+    for msg in messages:
+        role = msg["role"].upper()
+        content = msg["content"]
+        full_text += f"[{role}]\n{content}\n\n"
+
+    if verbose:
+        return full_text.rstrip()
+    else:
+        # Truncate: show first 500 chars of noise, then "...", then attack
+        lines = full_text.split("\n")
+        truncated = ""
+        chars_so_far = 0
+        attack_line = None
+
+        # Find the attack line (last user message)
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].strip().startswith("[USER]"):
+                attack_line = i
+                break
+
+        # Accumulate up to 500 chars before attack
+        for i, line in enumerate(lines):
+            if i == attack_line:
+                break
+            truncated += line + "\n"
+            chars_so_far += len(line)
+            if chars_so_far > 500:
+                truncated += "\n[... truncated noise ...]\n\n"
+                break
+
+        # Append the attack
+        if attack_line is not None:
+            truncated += "\n".join(lines[attack_line:])
+
+        return truncated.rstrip()
+
+
+# ─── Message composition helpers ──────────────────────────────────────────────
+
+def _build_messages(
+    noise_messages: list,
+    attack_text: str,
+    injection_style: str = "separate",
+) -> list[dict]:
+    """
+    Constructs the message array based on injection style.
+
+    Styles:
+      "separate"   — noise in prior turn, attack in fresh user message (default, indirect injection)
+      "mixed"      — single user message: noise + "\n\n" + attack (direct mixing)
+      "embedded"   — attack embedded within the noise document itself
+      "assistant"  — attack as continuation of assistant's prior response
+    """
+    if injection_style == "separate":
+        # Original: [noise_user, noise_assistant, attack_user]
+        messages = noise_messages + [{"role": "user", "content": attack_text}]
+
+    elif injection_style == "mixed":
+        # Combined into single user message
+        if noise_messages:
+            noise_text = noise_messages[0]["content"]
+            combined = f"{noise_text}\n\n--- END CONTEXT ---\n\n{attack_text}"
+            messages = [{"role": "user", "content": combined}]
+        else:
+            messages = [{"role": "user", "content": attack_text}]
+
+    elif injection_style == "embedded":
+        # Attack embedded at the end of the noise document. Keep a final user
+        # turn so the Anthropic API request is valid.
+        if noise_messages:
+            noise_text = noise_messages[0]["content"]
+            embedded = f"{noise_text}\n\n[INLINE INSTRUCTION: {attack_text}]"
+            messages = [{"role": "user", "content": embedded}]
+        else:
+            messages = [{"role": "user", "content": attack_text}]
+
+    elif injection_style == "assistant":
+        # Attack as continuation of assistant's prior turn
+        if noise_messages and len(noise_messages) >= 2:
+            # Assume noise_messages[-1] is an assistant turn, append to it
+            modified = list(noise_messages)
+            modified[-1] = {
+                "role": "assistant",
+                "content": modified[-1]["content"] + f"\n\n{attack_text}"
+            }
+            messages = modified
+        else:
+            messages = noise_messages + [{"role": "user", "content": attack_text}]
+
+    else:
+        raise ValueError(f"Unknown injection_style: {injection_style}")
+
+    # Anthropic messages must end with a user turn.
+    if not messages or messages[-1].get("role") != "user":
+        messages.append({
+            "role": "user",
+            "content": "Please continue."
+        })
+
+    return messages
+
 
 # ─── Single trial ─────────────────────────────────────────────────────────────
 
@@ -110,6 +222,8 @@ def run_single_trial(
     fill_pct: float,
     trial_num: int,
     strategy: str = config.DEFAULT_NOISE_STRATEGY,
+    injection_style: str = "separate",
+    verbose: bool = False,
 ) -> dict:
     """
     Execute one experiment trial.
@@ -117,18 +231,21 @@ def run_single_trial(
     Pipeline:
       1. Calculate how many tokens to fill (fill_pct × MAX_CONTEXT_TOKENS)
       2. Build noise messages to pre-load the context
-      3. Append the attack prompt as the final user message
+      3. Compose messages using the specified injection style
       4. Call Claude API and capture exact token counts from usage field
       5. Pass response to the IRS classifier
       6. Return a fully-populated result record
 
     Parameters
     ----------
-    client    : Anthropic SDK client
-    attack    : dict with attack metadata and text
-    fill_pct  : fraction of context to pre-fill (0.0 – 1.0)
-    trial_num : trial index for this (attack × fill_level) combination
-    strategy  : noise generation strategy
+    client          : Anthropic SDK client
+    attack          : dict with attack metadata and text
+    fill_pct        : fraction of context to pre-fill (0.0 – 1.0)
+    trial_num       : trial index for this (attack × fill_level) combination
+    strategy        : noise generation strategy
+    injection_style : how to compose attack with noise context:
+                      "separate" (default), "mixed", "embedded", or "assistant"
+    verbose         : if True, store full input/output text; if False, truncate
 
     Returns
     -------
@@ -141,12 +258,12 @@ def run_single_trial(
 
     # ── Step 1: Build context ──────────────────────────────────────────────────
     target_fill_tokens = int(config.MAX_CONTEXT_TOKENS * fill_pct)
-    noise_messages = build_noise_messages(target_fill_tokens, strategy=strategy)
+    noise_messages = build_noise_messages(target_fill_tokens, strategy=strategy, fill_pct=fill_pct)
     est_noise_tokens = estimated_noise_tokens(noise_messages)
 
     # ── Step 2: Compose messages ───────────────────────────────────────────────
-    # Order: [noise user msg, noise assistant reply] + [attack user msg]
-    messages = noise_messages + [{"role": "user", "content": attack_text}]
+    # Apply the specified injection style
+    messages = _build_messages(noise_messages, attack_text, injection_style)
 
     # ── Base result record ─────────────────────────────────────────────────────
     record = {
@@ -160,6 +277,7 @@ def run_single_trial(
         "model":                config.MODEL,
         "fill_pct":             fill_pct,
         "fill_strategy":        strategy,
+        "injection_style":      injection_style,
         "trial_num":            trial_num,
         "target_fill_tokens":   target_fill_tokens,
         "est_noise_tokens":     est_noise_tokens,
@@ -184,6 +302,10 @@ def run_single_trial(
         "error":                None,
     }
 
+    # Capture full input text (will be formatted as verbose or truncated)
+    full_input_text = _format_input_text(messages, verbose=verbose)
+    record["full_input_text"] = full_input_text
+
     try:
         # ── Step 3: Call the target model ─────────────────────────────────────
         response = client.messages.create(
@@ -194,6 +316,7 @@ def run_single_trial(
         )
 
         model_response       = response.content[0].text
+        record["full_output_text"] = model_response
         actual_input_tokens  = response.usage.input_tokens
         actual_output_tokens = response.usage.output_tokens
 
@@ -231,7 +354,7 @@ def run_single_trial(
     except anthropic.RateLimitError as e:
         record["error"] = f"RateLimitError: {e}"
         print(f"  [RATE LIMIT] {attack_id} T{trial_num} — waiting 10s and retrying…")
-        time.sleep(20)
+        time.sleep(60)
         # Retry once
         return run_single_trial(client, attack, fill_pct, trial_num, strategy)
 
@@ -312,6 +435,8 @@ def run_experiment(
     fill_levels: list[float] = None,
     n_trials: int = None,
     strategy: str = None,
+    injection_style: str = None,
+    verbose: bool = False,
     output_dir: str = None,
     dry_run: bool = False,
 ) -> list[dict]:
@@ -320,11 +445,19 @@ def run_experiment(
 
     In dry_run mode, the input file is validated and the run plan is printed
     but no API calls are made. Use this to check your attack file and settings.
+
+    Parameters
+    ----------
+    injection_style : str
+        How to compose attack with noise context:
+        "separate" (default), "mixed", "embedded", or "assistant"
     """
     fill_levels = fill_levels or config.FILL_LEVELS
     n_trials    = n_trials    or config.N_TRIALS
     strategy    = strategy    or config.DEFAULT_NOISE_STRATEGY
+    injection_style = injection_style or "separate"
     output_dir  = output_dir  or config.RESULTS_DIR
+    verbose     = verbose     or False
 
     attacks = load_attacks(attacks_file)
     total_runs = len(attacks) * len(fill_levels) * n_trials
@@ -338,8 +471,10 @@ def run_experiment(
     print(f"  Fill levels    : {[f'{x*100:.0f}%' for x in fill_levels]}")
     print(f"  Trials/combo   : {n_trials}")
     print(f"  Noise strategy : {strategy}")
+    print(f"  Injection style: {injection_style}")
     print(f"  Total runs     : {total_runs}")
     print(f"  Output dir     : {output_dir}")
+    print("  Stop early     : Press Ctrl+C to save partial results")
     print("═" * 64)
 
     if dry_run:
@@ -352,64 +487,37 @@ def run_experiment(
     all_results = []
     run_count = 0
 
-    for attack in attacks:
-        print(f"\n── Attack: {attack['attack_id']} ({attack['attack_type']}) ──")
-        for fill_pct in fill_levels:
-            for trial in range(1, n_trials + 1):
-                run_count += 1
-                print(f"  Run {run_count}/{total_runs}", end="  ")
-                record = run_single_trial(client, attack, fill_pct, trial, strategy)
-                all_results.append(record)
-                time.sleep(config.REQUEST_DELAY)
+    # Pre-generate semantic noise for all fill levels
+    if strategy == "semantic_noise":
+        print("\n  [SETUP] Pre-generating semantic noise corpus...")
+        pre_generate_noise_cache(fill_levels, strategy=strategy, api_key=config.ANTHROPIC_API_KEY)
+        print("  [SETUP] Noise pre-generation complete.\n")
 
-    save_results(all_results, output_dir)
-    print_summary(all_results, fill_levels)
+    interrupted = False
+
+    try:
+        for attack in attacks:
+            print(f"\n── Attack: {attack['attack_id']} ({attack['attack_type']}) ──")
+            for fill_pct in fill_levels:
+                for trial in range(1, n_trials + 1):
+                    run_count += 1
+                    print(f"  Run {run_count}/{total_runs}", end="  ")
+                    record = run_single_trial(client, attack, fill_pct, trial, strategy, injection_style)
+                    all_results.append(record)
+                    time.sleep(config.REQUEST_DELAY)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n\n  [INTERRUPTED] Run stopped by user (Ctrl+C).")
+        print(f"  Completed runs  : {len(all_results)} / {total_runs}")
+        print("  Saving partial results...")
+
+    if all_results:
+        save_results(all_results, output_dir)
+        print_summary(all_results, fill_levels)
+    else:
+        print("\n  No completed trials to save.")
+
+    if interrupted:
+        print("\n  Partial outputs written successfully.")
+
     return all_results
-
-
-# ─── CLI entry point ──────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="LLM Context Window Saturation — Prompt Injection Experiment"
-    )
-    parser.add_argument(
-        "--input", required=True,
-        help="Path to attack prompts file (.json or .csv)"
-    )
-    parser.add_argument(
-        "--fill-levels", default=None,
-        help="Comma-separated fill percentages, e.g. 0,25,50,75,100 (default: from config.py)"
-    )
-    parser.add_argument(
-        "--trials", type=int, default=None,
-        help=f"Trials per (attack × fill level) combination (default: {config.N_TRIALS})"
-    )
-    parser.add_argument(
-        "--strategy", default=config.DEFAULT_NOISE_STRATEGY,
-        choices=["semantic_noise", "many_shot", "random_text"],
-        help="Noise injection strategy (default: semantic_noise)"
-    )
-    parser.add_argument(
-        "--output-dir", default=config.RESULTS_DIR,
-        help=f"Directory for result files (default: {config.RESULTS_DIR})"
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Validate input file and print run plan without making API calls"
-    )
-    args = parser.parse_args()
-
-    levels = (
-        [float(x) / 100.0 for x in args.fill_levels.split(",")]
-        if args.fill_levels else None
-    )
-
-    run_experiment(
-        attacks_file = args.input,
-        fill_levels  = levels,
-        n_trials     = args.trials,
-        strategy     = args.strategy,
-        output_dir   = args.output_dir,
-        dry_run      = args.dry_run,
-    )
