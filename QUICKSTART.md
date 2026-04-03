@@ -13,7 +13,7 @@ See actual model responses without classification noise:
 
 ```bash
 cd experiment
-python test_attacks.py --input attacks/sample_attacks.json --verbose 2>&1 | head -200
+python test_attacks.py --input attacks/sample_attacks.json --verbose 
 ```
 
 **What to look for:**

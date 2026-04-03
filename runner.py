@@ -502,7 +502,7 @@ def run_experiment(
                 for trial in range(1, n_trials + 1):
                     run_count += 1
                     print(f"  Run {run_count}/{total_runs}", end="  ")
-                    record = run_single_trial(client, attack, fill_pct, trial, strategy, injection_style)
+                    record = run_single_trial(client, attack, fill_pct, trial, strategy, injection_style, verbose)
                     all_results.append(record)
                     time.sleep(config.REQUEST_DELAY)
     except KeyboardInterrupt:
@@ -521,3 +521,66 @@ def run_experiment(
         print("\n  Partial outputs written successfully.")
 
     return all_results
+
+
+# ─── CLI entry point ──────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="LLM Context Window Saturation — Prompt Injection Experiment"
+    )
+    parser.add_argument(
+        "--input", required=True,
+        help="Path to attack prompts file (.json or .csv)"
+    )
+    parser.add_argument(
+        "--fill-levels", default=None,
+        help="Comma-separated fill percentages, e.g. 0,25,50,75,100 (default: from config.py)"
+    )
+    parser.add_argument(
+        "--trials", type=int, default=None,
+        help=f"Trials per (attack × fill level) combination (default: {config.N_TRIALS})"
+    )
+    parser.add_argument(
+        "--strategy", default=config.DEFAULT_NOISE_STRATEGY,
+        choices=["semantic_noise", "many_shot", "random_text"],
+        help="Noise injection strategy (default: from config.py)"
+    )
+    parser.add_argument(
+        "--injection-style", default="separate",
+        choices=["separate", "mixed", "embedded", "assistant"],
+        help="Message composition strategy for combining noise with attack (default: separate)"
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Store full input/output text in results (default: truncated summaries)"
+    )
+    parser.add_argument(
+        "--output-dir", default=config.RESULTS_DIR,
+        help=f"Directory for result files (default: {config.RESULTS_DIR})"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Validate input and print run plan without making API calls"
+    )
+
+    args = parser.parse_args()
+
+    fill_levels = None
+    if args.fill_levels:
+        try:
+            fill_levels = [float(x) / 100.0 for x in args.fill_levels.split(",")]
+        except ValueError:
+            print("ERROR: --fill-levels must be comma-separated numbers (e.g., 0,25,50,75,100)")
+            exit(1)
+
+    run_experiment(
+        attacks_file=args.input,
+        fill_levels=fill_levels,
+        n_trials=args.trials,
+        strategy=args.strategy,
+        injection_style=args.injection_style,
+        verbose=args.verbose,
+        output_dir=args.output_dir,
+        dry_run=args.dry_run,
+    )
