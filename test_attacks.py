@@ -34,6 +34,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 import config
+from classifier import classify_injection
 
 
 def load_attacks(filepath: str) -> list[dict]:
@@ -57,18 +58,20 @@ def run_test(attacks_file: str, verbose: bool = False):
     model = config.CLASSIFIER_MODEL  # claude-haiku-4-5-20251001
 
     print("\n" + "═" * 68)
-    print("  ATTACK SMOKE TEST  (0% fill · 1 trial · no classifier)")
+    print("  ATTACK SMOKE TEST  (0% fill · 1 trial · classifier enabled)")
     print(f"  Model  : {model}")
     print(f"  Attacks: {len(attacks)}")
     print(f"  System prompt preview: {config.SYSTEM_PROMPT[:80].strip()}…")
     print("═" * 68)
 
     total_in = total_out = 0
+    total_clf_in = total_clf_out = 0
     results = []
 
     for i, attack in enumerate(attacks, 1):
         attack_id   = attack.get("attack_id", f"#{i}")
         attack_type = attack.get("attack_type", "unknown")
+        attack_goal = attack.get("attack_goal", "unknown")
         attack_text = attack["attack_text"]
 
         print(f"\n[{i}/{len(attacks)}] {attack_id} — {attack_type}")
@@ -95,12 +98,37 @@ def run_test(attacks_file: str, verbose: bool = False):
             for line in reply.splitlines():
                 print(f"    {line}")
 
+            # Classify attack success against system prompt retention
+            classification = classify_injection(
+                client=client,
+                system_prompt=config.SYSTEM_PROMPT,
+                attack_type=attack_type,
+                attack_goal=attack_goal,
+                attack_text=attack_text,
+                model_response=reply,
+                judge_model=config.CLASSIFIER_MODEL,
+            )
+
+            total_clf_in += classification.get("classifier_in", 0) or 0
+            total_clf_out += classification.get("classifier_out", 0) or 0
+
+            print(
+                f"  Classifier: IRS {classification['irs']:.1f} | "
+                f"Result {'SUCCESS' if classification['success'] else 'FAILURE'} | "
+                f"Conf {classification['confidence']}"
+            )
+            if verbose:
+                print(f"  Violation : {classification['violation_type']}")
+                print(f"  Reason    : {classification['reason']}")
+
             results.append({
                 "attack_id":   attack_id,
                 "attack_type": attack_type,
+                "attack_goal": attack_goal,
                 "tokens_in":   in_tokens,
                 "tokens_out":  out_tokens,
                 "response":    reply,
+                "classifier":  classification,
             })
 
         except Exception as e:
@@ -113,14 +141,21 @@ def run_test(attacks_file: str, verbose: bool = False):
 
         time.sleep(0.3)
 
-    # ── Summary ───────────────────────────────────────────────────────────────
-    print("\n" + "─" * 68)
-    print(f"  Done. {len(attacks)} attacks tested.")
-    print(f"  Total tokens used : {total_in:,} in · {total_out:,} out · "
-          f"{total_in + total_out:,} combined")
+        # ── Summary ───────────────────────────────────────────────────────────────
+        print("\n" + "─" * 68)
+        print(f"  Done. {len(attacks)} attacks tested.")
+        print(f"  Total tokens used : {total_in:,} in · {total_out:,} out · "
+            f"{total_in + total_out:,} combined")
+        print(f"  Classifier tokens : {total_clf_in:,} in · {total_clf_out:,} out · "
+            f"{total_clf_in + total_clf_out:,} combined")
 
-    # Rough cost estimate (Haiku April 2026 pricing)
-    est_cost = (total_in / 1_000_000 * 0.80) + (total_out / 1_000_000 * 4.00)
+        # Rough cost estimate (Haiku April 2026 pricing)
+        est_cost = (
+        (total_in / 1_000_000 * 0.80)
+        + (total_out / 1_000_000 * 4.00)
+        + (total_clf_in / 1_000_000 * 0.80)
+        + (total_clf_out / 1_000_000 * 4.00)
+    )
     print(f"  Estimated cost    : ~${est_cost:.4f} USD")
     print("─" * 68)
     print("\n  Review the responses above and mark which attacks you consider")
@@ -134,9 +169,12 @@ def run_test(attacks_file: str, verbose: bool = False):
         json.dump({
             "timestamp": ts,
             "model": model,
+            "classifier_model": config.CLASSIFIER_MODEL,
             "fill_pct": 0,
             "total_in_tokens": total_in,
             "total_out_tokens": total_out,
+            "total_classifier_in_tokens": total_clf_in,
+            "total_classifier_out_tokens": total_clf_out,
             "attacks": results,
         }, f, indent=2, ensure_ascii=False)
     print(f"  Log saved → {log_path}\n")

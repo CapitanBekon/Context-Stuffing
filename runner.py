@@ -291,8 +291,11 @@ def run_single_trial(
                                  if noise_messages else "(no pre-fill context)",
         # Response and classification
         "model_response":       None,
-        "irs":                  None,   # 1 = held, 0 = bypassed
-        "injection_success":    None,   # True if attack succeeded
+        "irs":                  None,   # 1.0 = held, 0.5 = partial, 0.0 = bypassed
+        "injection_success":    None,   # True if attack succeeded (full or partial)
+        "full_success":         None,   # True only if full bypass
+        "partial_success":      None,   # True only if soft violation
+        "violation_type":       None,   # Category of violation detected
         "classifier_confidence": None,
         "classifier_reason":    None,
         # Classifier token costs (for budget tracking)
@@ -337,17 +340,27 @@ def run_single_trial(
 
         record["irs"]                  = classification["irs"]
         record["injection_success"]    = classification["success"]
+        record["full_success"]         = classification.get("full_success", False)
+        record["partial_success"]      = classification.get("partial_success", False)
+        record["violation_type"]       = classification.get("violation_type", "none")
         record["classifier_confidence"]= classification["confidence"]
         record["classifier_reason"]    = classification["reason"]
         record["classifier_in_tokens"] = classification["classifier_in"]
         record["classifier_out_tokens"]= classification["classifier_out"]
 
-        status_icon = "✗ SUCCESS" if classification["success"] else "✓ HELD"
+        if classification.get("full_success"):
+            status_icon = "Completely Bypassed"
+        elif classification.get("partial_success"):
+            status_icon = "Partially Bypassed"
+        else:
+            status_icon = "No Success"
+        vtype = classification.get("violation_type", "none")
         print(
             f"  [{status_icon}] {attack_id} | "
             f"Fill: {fill_pct*100:5.1f}% | Trial {trial_num} | "
             f"Tokens in: {actual_input_tokens:,} out: {actual_output_tokens:,} | "
             f"IRS: {classification['irs']} | "
+            f"Violation: {vtype} | "
             f"Conf: {classification['confidence']}"
         )
 
@@ -413,18 +426,40 @@ def print_summary(results: list[dict], fill_levels: list[float]) -> None:
     print(f"  Classifier tokens  : {clf_in:,} in  {clf_out:,} out")
 
     overall_irs = sum(r["irs"] for r in valid) / len(valid)
+    full_successes = sum(1 for r in valid if r.get("full_success"))
+    partial_successes = sum(1 for r in valid if r.get("partial_success"))
+    total_successes = sum(1 for r in valid if r.get("injection_success"))
+    held = len(valid) - total_successes
+
     print(f"\n  Overall IRS        : {overall_irs:.3f}  (1.0 = perfect retention)")
+    print(f"  Full successes     : {full_successes} / {len(valid)} ({full_successes/len(valid)*100:.1f}%)")
+    print(f"  Partial successes  : {partial_successes} / {len(valid)} ({partial_successes/len(valid)*100:.1f}%)")
+    print(f"  Total violations   : {total_successes} / {len(valid)} ({total_successes/len(valid)*100:.1f}%)")
+    print(f"  Held (no violation): {held} / {len(valid)} ({held/len(valid)*100:.1f}%)")
+
+    # Violation type breakdown
+    vtypes = {}
+    for r in valid:
+        vt = r.get("violation_type", "none")
+        if vt and vt != "none":
+            vtypes[vt] = vtypes.get(vt, 0) + 1
+    if vtypes:
+        print("\n  Violations by type:")
+        for vt in sorted(vtypes, key=vtypes.get, reverse=True):
+            print(f"    {vt:30} {vtypes[vt]:>4}")
 
     print("\n  IRS by fill level:")
-    print(f"  {'Fill':>8}  {'IRS':>6}  {'Successes':>12}  {'Trials':>8}")
-    print("  " + "-" * 44)
+    print(f"  {'Fill':>8}  {'IRS':>6}  {'Full':>6}  {'Partial':>8}  {'Held':>6}  {'Trials':>8}")
+    print("  " + "-" * 56)
     for fill_pct in fill_levels:
         runs = [r for r in valid if r["fill_pct"] == fill_pct]
         if not runs:
             continue
         irs = sum(r["irs"] for r in runs) / len(runs)
-        successes = sum(1 for r in runs if r["injection_success"])
-        print(f"  {fill_pct*100:7.0f}%  {irs:6.3f}  {successes:>12}  {len(runs):>8}")
+        full = sum(1 for r in runs if r.get("full_success"))
+        partial = sum(1 for r in runs if r.get("partial_success"))
+        held_count = len(runs) - full - partial
+        print(f"  {fill_pct*100:7.0f}%  {irs:6.3f}  {full:>6}  {partial:>8}  {held_count:>6}  {len(runs):>8}")
     print("═" * 64)
 
 
